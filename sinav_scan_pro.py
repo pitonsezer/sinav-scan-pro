@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""SINAV SCAN PRO V1 – yerel Windows tarama ve sınav PDF ayırıcı."""
+"""SINAV SCAN PRO V2 – yerel Windows tarama ve sınav PDF ayırıcı."""
 import os, sys, re, shutil, subprocess, threading, tempfile
 from pathlib import Path
 import tkinter as tk
@@ -7,19 +7,42 @@ from tkinter import ttk, filedialog, messagebox
 import fitz
 from PIL import Image, ImageTk
 
-APP = 'SINAV SCAN PRO V1'
+APP = 'SINAV SCAN PRO V2'
 
 def naps2_path():
-    paths = [r'C:\Program Files\NAPS2\NAPS2.Console.exe', r'C:\Program Files (x86)\NAPS2\NAPS2.Console.exe']
-    for p in paths:
-        if Path(p).exists(): return p
-    return shutil.which('NAPS2.Console.exe') or shutil.which('naps2.console')
+    """Find the CLI, never silently substitute the GUI or an installer."""
+    bases = [Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'NAPS2',
+             Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')) / 'NAPS2',
+             Path.home() / 'AppData' / 'Local' / 'Programs' / 'NAPS2']
+    for base in bases:
+        for name in ('NAPS2.Console.exe', 'naps2.console.exe'):
+            candidate = base / name
+            if candidate.is_file():
+                return str(candidate)
+    for name in ('NAPS2.Console.exe', 'naps2.console'):
+        result = shutil.which(name)
+        if result and Path(result).is_file():
+            return result
+    return None
+
+
+def valid_console(path):
+    return bool(path and Path(path).is_file() and Path(path).name.lower() == 'naps2.console.exe')
+
+
+def missing_console_message():
+    return ('NAPS2 komut satırı bileşeni (NAPS2.Console.exe) bulunamadı.\n\n'
+            'NAPS2.exe normal arayüzdür; tarayıcı listesi komutlarını çalıştırmaz. '
+            'Kurulum dosyasını da seçmeyin.\n\n'
+            'NAPS2 kurulumunu onarın veya resmî NAPS2 paketinden Console bileşenini yükleyin. '
+            'Ardından NAPS2 Konumu ile NAPS2.Console.exe dosyasını seçin.\n'
+            'Tarayıcı bağlı değilken cihaz listesi boş olabilir.')
 
 class App:
     def __init__(self, root):
         self.root=root; root.title(APP); root.geometry('1040x780'); root.minsize(860,650)
         self.source=tk.StringVar(); self.out=tk.StringVar(value=str(Path.home()/'Documents'/'Sinav_Scan_Pro'))
-        self.device=tk.StringVar(); self.driver=tk.StringVar(value='twain'); self.dpi=tk.StringVar(value='300')
+        self.device=tk.StringVar(); self.devices=[]; self.driver=tk.StringVar(value='twain'); self.dpi=tk.StringVar(value='300')
         self.mode=tk.StringVar(value='gray'); self.sides=tk.StringVar(value='duplex'); self.pages=tk.IntVar(value=2)
         self.hide=tk.BooleanVar(value=True); self.hide_pct=tk.DoubleVar(value=13)
         self.filename=tk.StringVar(value='Sinav'); self.naps=tk.StringVar(value=naps2_path() or '')
@@ -36,7 +59,7 @@ class App:
         ttk.Button(row,text='NAPS2 Konumu',command=self.choose_naps).pack(side='left')
         dr=ttk.Frame(top);dr.pack(fill='x',pady=6)
         ttk.Label(dr,text='Sürücü').pack(side='left');ttk.Combobox(dr,textvariable=self.driver,values=['twain','wia','escl'],width=7,state='readonly').pack(side='left',padx=5)
-        ttk.Label(dr,text='Cihaz adı').pack(side='left');ttk.Entry(dr,textvariable=self.device,width=29).pack(side='left',padx=5)
+        ttk.Label(dr,text='Cihaz adı').pack(side='left');self.device_combo=ttk.Combobox(dr,textvariable=self.device,width=29,values=[],state='normal');self.device_combo.pack(side='left',padx=5)
         ttk.Button(dr,text='Cihazları Bul',command=self.detect).pack(side='left',padx=5)
         ttk.Label(dr,text='ADF').pack(side='left',padx=(10,2));ttk.Combobox(dr,textvariable=self.sides,values=['duplex','feeder','glass'],width=8,state='readonly').pack(side='left')
         dr2=ttk.Frame(top);dr2.pack(fill='x')
@@ -70,8 +93,10 @@ class App:
             self.status.set(f'PDF açıldı: {len(self._doc)} sayfa. Sayfa sıralamasını kontrol edin.')
         except Exception as e:messagebox.showerror('PDF açılamadı',str(e))
     def choose_naps(self):
-        p=filedialog.askopenfilename(filetypes=[('NAPS2 Console','NAPS2.Console.exe'),('EXE','*.exe')]);
-        if p:self.naps.set(p)
+        p=filedialog.askopenfilename(filetypes=[('NAPS2 Console','NAPS2.Console.exe')]);
+        if p:
+            if valid_console(p): self.naps.set(p)
+            else: messagebox.showerror('Yanlış dosya',missing_console_message())
     def choose_out(self):
         p=filedialog.askdirectory();
         if p:self.out.set(p)
@@ -95,16 +120,34 @@ class App:
     def step(self,k):
         if self._doc:self._current=max(0,min(len(self._doc)-1,self._current+k));self.preview()
     def detect(self):
-        exe=self.naps.get()
-        if not exe or not Path(exe).exists():messagebox.showwarning('NAPS2 eksik','Önce NAPS2 yükleyin ve NAPS2.Console.exe dosyasını seçin.');return
-        try:
-            p=subprocess.run([exe,'--listdevices','--driver',self.driver.get()],capture_output=True,text=True,timeout=30,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-            devices=p.stdout.strip() or p.stderr.strip() or 'Cihaz bulunamadı.'
-            messagebox.showinfo('Tarayıcılar',devices+'\n\nCihaz adını yukarıdaki alana yazın.')
-        except Exception as e:messagebox.showerror('Tarayıcı aranamadı',str(e))
+        exe=self.naps.get() or naps2_path()
+        if not valid_console(exe):
+            messagebox.showwarning('NAPS2 Console eksik',missing_console_message());return
+        self.naps.set(exe)
+        self.status.set('Tarayıcılar aranıyor...')
+        def work():
+            try:
+                p=subprocess.run([exe,'--listdevices','--driver',self.driver.get()],
+                                 capture_output=True,text=True,timeout=45,
+                                 creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                if p.returncode != 0:
+                    raise RuntimeError((p.stderr or p.stdout or 'NAPS2 cihaz arama hatası').strip())
+                devices=[line.strip() for line in p.stdout.splitlines() if line.strip()]
+                def done():
+                    self.devices=devices;self.device_combo.configure(values=devices)
+                    if devices:
+                        self.device.set(devices[0]);self.status.set(f'{len(devices)} tarayıcı bulundu.')
+                        messagebox.showinfo('Tarayıcılar','Bulunan cihazlar:\n'+'\n'.join(devices))
+                    else:
+                        self.status.set('Bu sürücüyle tarayıcı bulunamadı. WIA/TWAIN seçimini değiştirip deneyin.')
+                        messagebox.showinfo('Tarayıcılar','Cihaz bulunamadı. Tarayıcı bağlı değilse normaldir. WIA veya TWAIN deneyin.')
+                self.root.after(0,done)
+            except Exception as e:
+                self.root.after(0,lambda err=str(e):messagebox.showerror('Tarayıcı aranamadı',err))
+        threading.Thread(target=work,daemon=True).start()
     def scan(self):
         exe=self.naps.get()
-        if not exe or not Path(exe).exists():messagebox.showwarning('NAPS2 bulunamadı','https://www.naps2.com/ adresinden Windows sürümünü kurup NAPS2.Console.exe dosyasını seçin.');return
+        if not valid_console(exe):messagebox.showwarning('NAPS2 Console eksik',missing_console_message());return
         if not self.device.get().strip():messagebox.showwarning('Cihaz adı','Önce Cihazları Bul düğmesiyle tarayıcıyı seçin ve adını yazın.');return
         if not messagebox.askokcancel('ADF taraması','ADF’ye birkaç deneme yaprağı yerleştirdiniz mi?\nİlk denemede ön-arka sayfa sırasını kontrol edeceğiz.'):return
         self.scanbtn.config(state='disabled');self.status.set('Tarayıcıdan PDF alınıyor; işlem bitene kadar bekleyin...')
