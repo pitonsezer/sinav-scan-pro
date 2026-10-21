@@ -1,3 +1,4 @@
+
 name: Sinav Scan Pro - Windows EXE
 
 on:
@@ -25,14 +26,19 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: EXE olustur
+      - name: Python kodunu kontrol et
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name SinavScanPro sinav_scan_pro.py
+          python -m py_compile sinav_scan_pro.py
+
+      - name: EXE olustur - Hata ayiklama
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --console --name SinavScanPro sinav_scan_pro.py
 
       - name: EXE dosyasini yukle
         uses: actions/upload-artifact@v4
         with:
-          name: SinavScanPro-Windows
+          name: SinavScanPro-V3-Debug
           path: dist/SinavScanPro.exe
           if-no-files-found: error
